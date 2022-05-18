@@ -1,3 +1,157 @@
+# Bilibili Downloader
+
+
+
+## Extract BVID
+
+extract BVID from a specifil URL Given by terminal.
+
+such as `"https://www.bilibili.com/video/BV1xK4y1d7oL?spm_id_from=333.337.search-card.all.click"`
+
+USE regexp **<span style="color:red">`/?(BV\w+)[/?]?`</span>** to findSubMatch, will get `/BV1xK4y1d7oL?` & `BV1xK4y1d7oL`
+
+## Build Video struct
+
+### Get CID
+
+Cid is the abstraction of a video, a video has a unique cid related.
+
+We can get cid from API `"https://api.bilibili.com/x/player/pagelist?bvid=%v"`
+
+```go
+func rawGetURL(URL string, data interface{}, f func(*http.Request)) error {
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", URL, nil)
+	if err != nil {
+		return err
+	}
+	if f != nil {
+		f(req)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	err = json.NewDecoder(resp.Body).Decode(data)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func getVideos(bvid string) []*Video {
+	getCidUrl := fmt.Sprintf(getCidAPI, bvid)
+	var blCid BLCid
+	err := rawGetURL(getCidUrl, &blCid, nil)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("%+v\n", blCid)
+	var videos []*Video
+	for _, data := range blCid.Data {
+		v := Video{}
+		v.Cid = strconv.FormatInt(data.Cid, 10)
+		v.Title = data.Part
+		v.Bvid = bvid
+		v.QN = qn
+		v.getPlayURLs()
+		videos = append(videos, &v)
+	}
+	return videos
+}
+```
+
+### Get video’s playURL
+
+If the quality of the video > 720P, then you need cookie carried when search palyURL.
+
+```go
+func (v *Video) getPlayURLs() {
+	getPlayURL := fmt.Sprintf(getVideoUrlAPI, v.Bvid, v.Cid, v.QN)
+	log.Printf("url: %v\n", getPlayURL)
+	pl := struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			Quality int `json:"quality"`
+			Durl    []struct {
+				Order     int    `json:"order"`
+				URL       string `json:"url"`
+				BackupURL string `json:"backup_url"`
+			} `json:"durl"`
+		} `json:"data"`
+	}{}
+	rawGetURL(getPlayURL, &pl, setCookie)
+	fmt.Printf("%+v\n", pl)
+	for _, d := range pl.Data.Durl {
+		v.PlayURLs = append(v.PlayURLs, d.URL)
+	}
+}
+```
+
+## Download Videos
+
+### Define customer downloader
+
+The customer downloader is the wrapper of resp.Body, the only purpose is to add a visuable progress level when downloading.
+
+```go
+func (v *Video) download(dir string) {
+	client := &http.Client{}
+	for _, URL := range v.PlayURLs {
+		u, err := url.Parse(URL)
+		if err != nil {
+			panic(err)
+		}
+		req, _ := http.NewRequest("GET", URL, nil)
+		setUserAgent(req)
+		setCookie(req)
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+		req.Header.Set("Range", "bytes=0-")                               // Range 的值要为 bytes=0- 才能下载完整视频
+		req.Header.Set("Referer", "https://www.bilibili.com/video/"+bvid) // 必需添加
+		req.Header.Set("Origin", "https://www.bilibili.com")
+		req.Header.Set("Connection", "keep-alive")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			panic(err)
+		}
+		defer resp.Body.Close()
+		dir = filepath.Join(dir, path.Base(u.Path))
+		f, err := os.OpenFile(dir, os.O_RDWR|os.O_CREATE, 0755)
+		if err != nil {
+			panic(err)
+		}
+		d := &downloader{
+			resp.Body,
+			resp.ContentLength,
+			0,
+		}
+		io.Copy(f, d)
+		fmt.Println("")
+	}
+}
+
+type downloader struct {
+	io.Reader
+	Total   int64
+	Current int64
+}
+
+func (d *downloader) Read(p []byte) (n int, err error) {
+	n, err = d.Reader.Read(p)
+	d.Current += int64(n)
+	fmt.Printf("\rprogress: %.2f%%", float64(d.Current)*100.0/float64(d.Total))
+	return
+}
+```
+
+## The Whole Code
+
+```go
 package main
 
 import (
@@ -249,3 +403,11 @@ func must(err error) {
 		panic(err)
 	}
 }
+```
+
+## Example
+
+```bash
+go run main.go -u "https://www.bilibili.com/video/BV1xK4y1d7oL?spm_id_from=333.337.search-card.all.click" -q 4K
+```
+
